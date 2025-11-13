@@ -193,6 +193,74 @@ export const getFileById = async (token: string, id: string) => {
 	return res;
 };
 
+export const recalculateChatAccumulator = async (token: string, chatId: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/files/recalculate-accumulator`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			chat_id: chatId
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.then((json) => {
+			return json;
+		})
+		.catch((err) => {
+			error = err.detail || err.message;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const updateFileChatId = async (token: string, id: string, chatId: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/files/${id}/chat-id`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			chat_id: chatId
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.then((json) => {
+			return json;
+		})
+		.catch((err) => {
+			error = err.detail || err.message;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const updateFileDataContentById = async (token: string, id: string, content: string) => {
 	let error = null;
 
@@ -318,7 +386,7 @@ export const validateFilesTotal = async (token: string, fileIds: string[]) => {
 	return res;
 };
 
-export const validateAndAddFile = async (token: string, id: string) => {
+export const validateAndAddFile = async (token: string, id: string, chatId: string) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/files/${id}/validate-add`, {
@@ -327,7 +395,10 @@ export const validateAndAddFile = async (token: string, id: string) => {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
 			authorization: `Bearer ${token}`
-		}
+		},
+		body: JSON.stringify({
+			chat_id: chatId
+		})
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
