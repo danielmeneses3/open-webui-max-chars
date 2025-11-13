@@ -210,6 +210,15 @@ class FilesTable:
                 for file in db.query(File).filter_by(user_id=user_id).all()
             ]
 
+    def get_files_by_chat_id(self, chat_id: str, user_id: str) -> list[FileModel]:
+        with get_db() as db:
+            files = db.query(File).filter_by(user_id=user_id).all()
+            result = []
+            for file in files:
+                if file.meta and isinstance(file.meta, dict) and file.meta.get("chat_id") == chat_id:
+                    result.append(FileModel.model_validate(file))
+            return result
+
     def update_file_by_id(
         self, id: str, form_data: FileUpdateForm
     ) -> Optional[FileModel]:

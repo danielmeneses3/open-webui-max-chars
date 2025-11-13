@@ -213,6 +213,16 @@ def upload_file_handler(
             },
         )
 
+        meta = {
+            "name": name,
+            "content_type": file.content_type,
+            "size": len(contents),
+            "data": file_metadata,
+        }
+        
+        if file_metadata and "chat_id" in file_metadata:
+            meta["chat_id"] = file_metadata["chat_id"]
+        
         file_item = Files.insert_new_file(
             user.id,
             FileForm(
@@ -223,12 +233,7 @@ def upload_file_handler(
                     "data": {
                         **({"status": "pending"} if process else {}),
                     },
-                    "meta": {
-                        "name": name,
-                        "content_type": file.content_type,
-                        "size": len(contents),
-                        "data": file_metadata,
-                    },
+                    "meta": meta,
                 }
             ),
         )
@@ -488,6 +493,68 @@ class ContentForm(BaseModel):
     content: str
 
 
+class ChatIdForm(BaseModel):
+    chat_id: str
+
+
+@router.post("/{id}/chat-id")
+async def update_file_chat_id(
+    id: str, form_data: ChatIdForm, request: Request, user=Depends(get_verified_user)
+):
+    file = Files.get_file_by_id(id)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    old_chat_id = file.meta.get("chat_id") if file.meta else None
+    new_chat_id = form_data.chat_id
+
+    if old_chat_id == new_chat_id:
+        return {"message": "File chat_id already set", "chat_id": new_chat_id}
+
+    if hasattr(request.app.state, "chat_char_accumulator"):
+        if old_chat_id and old_chat_id in request.app.state.chat_char_accumulator:
+            file_content = file.data.get("content", "") if file.data else ""
+            file_char_count = len(file_content)
+            old_total = request.app.state.chat_char_accumulator.get(old_chat_id, 0)
+            request.app.state.chat_char_accumulator[old_chat_id] = max(0, old_total - file_char_count)
+            log.debug(
+                f"Subtracted {file_char_count:,} chars from old chat {old_chat_id} "
+                f"(file {id} moved): {old_total:,} -> {request.app.state.chat_char_accumulator[old_chat_id]:,} chars"
+            )
+
+        if new_chat_id:
+            if not hasattr(request.app.state, "chat_char_accumulator"):
+                request.app.state.chat_char_accumulator = {}
+            file_content = file.data.get("content", "") if file.data else ""
+            file_char_count = len(file_content)
+            new_total = request.app.state.chat_char_accumulator.get(new_chat_id, 0)
+            request.app.state.chat_char_accumulator[new_chat_id] = new_total + file_char_count
+            log.debug(
+                f"Added {file_char_count:,} chars to new chat {new_chat_id} "
+                f"(file {id} moved): {new_total:,} -> {request.app.state.chat_char_accumulator[new_chat_id]:,} chars"
+            )
+
+    meta = file.meta.copy() if file.meta else {}
+    meta["chat_id"] = new_chat_id
+    Files.update_file_metadata_by_id(id, meta)
+
+    return {"message": "File chat_id updated successfully", "chat_id": new_chat_id}
+
+
 @router.post("/{id}/data/content/update")
 async def update_file_data_content_by_id(
     request: Request, id: str, form_data: ContentForm, user=Depends(get_verified_user)
@@ -732,20 +799,18 @@ async def delete_file_by_id(id: str, request: Request, user=Depends(get_verified
                 Storage.delete_file(file.path)
                 VECTOR_DB_CLIENT.delete(collection_name=f"file-{id}")
                 
-                # Subtract file's character count from accumulator when file is manually removed
-                if hasattr(request.app.state, "user_char_accumulator"):
-                    if user.id in request.app.state.user_char_accumulator:
-                        # Get character count of the removed file
+                if hasattr(request.app.state, "chat_char_accumulator"):
+                    chat_id = file.meta.get("chat_id") if file.meta else None
+                    if chat_id and chat_id in request.app.state.chat_char_accumulator:
                         file_content = file.data.get("content", "") if file.data else ""
                         file_char_count = len(file_content)
                         
-                        # Subtract from accumulator (ensure it doesn't go negative)
-                        current_total = request.app.state.user_char_accumulator[user.id]
+                        current_total = request.app.state.chat_char_accumulator[chat_id]
                         new_total = max(0, current_total - file_char_count)
-                        request.app.state.user_char_accumulator[user.id] = new_total
+                        request.app.state.chat_char_accumulator[chat_id] = new_total
                         
                         log.debug(
-                            f"Subtracting {file_char_count:,} chars from accumulator for user {user.id} "
+                            f"Subtracting {file_char_count:,} chars from accumulator for chat {chat_id} "
                             f"(file {id} removed): {current_total:,} -> {new_total:,} chars"
                         )
             except Exception as e:
@@ -775,6 +840,38 @@ async def delete_file_by_id(id: str, request: Request, user=Depends(get_verified
 
 class ValidateFilesForm(BaseModel):
     file_ids: list[str]
+
+
+class RecalculateAccumulatorForm(BaseModel):
+    chat_id: str
+
+
+@router.post("/recalculate-accumulator")
+async def recalculate_chat_accumulator(
+    form_data: RecalculateAccumulatorForm, request: Request, user=Depends(get_verified_user)
+):
+    if request.app.state.config.FILE_MAX_CHARS <= 0:
+        return {"message": "Character limit not enabled", "total_chars": 0}
+    
+    if not hasattr(request.app.state, "chat_char_accumulator"):
+        request.app.state.chat_char_accumulator = {}
+    
+    chat_files = Files.get_files_by_chat_id(form_data.chat_id, user.id)
+    total_chars = 0
+    for file in chat_files:
+        if file.data and file.data.get("content"):
+            total_chars += len(file.data["content"])
+    
+    request.app.state.chat_char_accumulator[form_data.chat_id] = total_chars
+    log.debug(
+        f"Recalculated accumulator for chat {form_data.chat_id}: {total_chars:,} chars (from {len(chat_files)} files)"
+    )
+    
+    return {
+        "message": "Accumulator recalculated successfully",
+        "total_chars": total_chars,
+        "file_count": len(chat_files)
+    }
 
 
 @router.post("/validate-total")
@@ -846,14 +943,14 @@ async def validate_files_total(
     }
 
 
+class ValidateAddForm(BaseModel):
+    chat_id: str
+
+
 @router.post("/{id}/validate-add")
 async def validate_and_add_file_to_accumulator(
-    id: str, request: Request, user=Depends(get_verified_user)
+    id: str, form_data: ValidateAddForm, request: Request, user=Depends(get_verified_user)
 ):
-    """
-    Validates if an already processed file can be added to the character accumulator.
-    If validation passes, adds the file's character count to the accumulator.
-    """
     file = Files.get_file_by_id(id)
 
     if not file:
@@ -875,13 +972,12 @@ async def validate_and_add_file_to_accumulator(
     file_content = file.data.get("content", "") if file.data else ""
     char_count = len(file_content)
 
-    # Validate character limit if configured (FILE_MAX_CHARS > 0 means enabled)
     if request.app.state.config.FILE_MAX_CHARS > 0:
         max_chars = request.app.state.config.FILE_MAX_CHARS
 
-        if not hasattr(request.app.state, "user_char_accumulator"):
-            request.app.state.user_char_accumulator = {}
-        current_total = request.app.state.user_char_accumulator.get(user.id, 0)
+        if not hasattr(request.app.state, "chat_char_accumulator"):
+            request.app.state.chat_char_accumulator = {}
+        current_total = request.app.state.chat_char_accumulator.get(form_data.chat_id, 0)
 
         total_chars = current_total + char_count
 
@@ -902,10 +998,9 @@ async def validate_and_add_file_to_accumulator(
                 detail=ERROR_MESSAGES.DEFAULT(error_message),
             )
 
-        # If validation passes, update accumulator with new total
-        request.app.state.user_char_accumulator[user.id] = total_chars
+        request.app.state.chat_char_accumulator[form_data.chat_id] = total_chars
         log.debug(
-            f"File {file.id} ({file.filename}) validated and added to accumulator for user {user.id}. "
+            f"File {file.id} ({file.filename}) validated and added to accumulator for chat {form_data.chat_id}. "
             f"Accumulator updated: {current_total:,} -> {total_chars:,} chars"
         )
 
