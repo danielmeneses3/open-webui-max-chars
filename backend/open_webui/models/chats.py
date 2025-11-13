@@ -125,7 +125,7 @@ class ChatTitleIdResponse(BaseModel):
 class ChatTable:
     def insert_new_chat(self, user_id: str, form_data: ChatForm) -> Optional[ChatModel]:
         with get_db() as db:
-            id = str(uuid.uuid4())
+            id = form_data.chat.get("id", str(uuid.uuid4()))
             chat = ChatModel(
                 **{
                     "id": id,

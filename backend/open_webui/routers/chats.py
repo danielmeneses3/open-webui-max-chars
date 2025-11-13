@@ -132,6 +132,13 @@ async def get_user_chat_list_by_user_id(
 @router.post("/new", response_model=Optional[ChatResponse])
 async def create_new_chat(form_data: ChatForm, user=Depends(get_verified_user)):
     try:
+        chat_id = form_data.chat.get("id")
+        if chat_id:
+            existing_chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id)
+            if existing_chat:
+                log.debug(f"Chat {chat_id} already exists, returning existing chat")
+                return ChatResponse(**existing_chat.model_dump())
+        
         chat = Chats.insert_new_chat(user.id, form_data)
         return ChatResponse(**chat.model_dump())
     except Exception as e:
@@ -572,6 +579,41 @@ async def send_chat_message_event_by_id(
 ############################
 # DeleteChatById
 ############################
+
+
+@router.post("/{id}/cleanup-if-empty")
+async def cleanup_empty_chat(id: str, request: Request, user=Depends(get_verified_user)):
+    chat = Chats.get_chat_by_id_and_user_id(id, user.id)
+    
+    if not chat:
+        return {"deleted": False, "reason": "Chat not found"}
+    
+    messages = chat.chat.get("messages", []) if chat.chat else []
+    history = chat.chat.get("history", {}) if chat.chat else {}
+    history_messages = history.get("messages", {}) if isinstance(history, dict) else {}
+    
+    has_messages = len(messages) > 0 or len(history_messages) > 0
+    
+    if not has_messages:
+        from open_webui.models.files import Files
+        chat_files = Files.get_files_by_chat_id(id, user.id)
+        has_files = len(chat_files) > 0
+        
+        if not has_files:
+            try:
+                if user.role == "admin":
+                    result = Chats.delete_chat_by_id(id)
+                else:
+                    result = Chats.delete_chat_by_id_and_user_id(id, user.id)
+                
+                if result:
+                    log.debug(f"Deleted empty chat {id} (no messages, no files)")
+                    return {"deleted": True, "reason": "Chat was empty"}
+            except Exception as e:
+                log.error(f"Error deleting empty chat {id}: {e}")
+                return {"deleted": False, "reason": f"Error: {str(e)}"}
+    
+    return {"deleted": False, "reason": "Chat has messages or files"}
 
 
 @router.delete("/{id}", response_model=bool)
