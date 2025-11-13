@@ -65,7 +65,8 @@
 		getPinnedChatList,
 		getTagsById,
 		updateChatById,
-		updateChatFolderIdById
+		updateChatFolderIdById,
+		cleanupEmptyChat
 	} from '$lib/apis/chats';
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
@@ -79,7 +80,7 @@
 		getTaskIdsByChatId
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
-	import { uploadFile } from '$lib/apis/files';
+	import { uploadFile, updateFileChatId, recalculateChatAccumulator } from '$lib/apis/files';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 	import { getFunctions } from '$lib/apis/functions';
 	import { updateFolderById } from '$lib/apis/folders';
@@ -987,8 +988,36 @@
 		autoScroll = true;
 
 		resetInput();
-		await chatId.set('');
+		const newChatId = uuidv4();
+		const oldChatId = $chatId;
+		await chatId.set(newChatId);
 		await chatTitle.set('');
+
+		if (oldChatId && files.length > 0) {
+			for (const file of files) {
+				if (file.id && file.type !== 'image') {
+					try {
+						await updateFileChatId(localStorage.token, file.id, newChatId);
+					} catch (error) {
+						console.error(`Failed to update chat_id for file ${file.id}:`, error);
+					}
+				}
+			}
+			
+			try {
+				await recalculateChatAccumulator(localStorage.token, newChatId);
+			} catch (error) {
+				console.error(`Failed to recalculate accumulator for chat ${newChatId}:`, error);
+			}
+		}
+		
+		if (oldChatId && oldChatId !== newChatId && !$temporaryChatEnabled) {
+			try {
+				await cleanupEmptyChat(localStorage.token, oldChatId);
+			} catch (error) {
+				console.error(`Failed to cleanup empty chat ${oldChatId}:`, error);
+			}
+		}
 
 		history = {
 			messages: {},

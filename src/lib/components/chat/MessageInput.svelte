@@ -23,7 +23,8 @@
 		user as _user,
 		showControls,
 		TTSWorker,
-		temporaryChatEnabled
+		temporaryChatEnabled,
+		chatId
 	} from '$lib/stores';
 
 	import {
@@ -42,6 +43,7 @@
 		getWeekday
 	} from '$lib/utils';
 	import { uploadFile, validateAndAddFile, validateFilesTotal, deleteFileById } from '$lib/apis/files';
+	import { cleanupEmptyChat } from '$lib/apis/chats';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { getSessionUser } from '$lib/apis/auths';
 	import { getTools } from '$lib/apis/tools';
@@ -555,7 +557,12 @@
 
 		if (!$temporaryChatEnabled) {
 			try {
-				// If the file is an audio file, provide the language for STT.
+				let currentChatId = $chatId;
+				if (!currentChatId) {
+					currentChatId = uuidv4();
+					await chatId.set(currentChatId);
+				}
+
 				let metadata = null;
 				if (
 					(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
@@ -566,8 +573,12 @@
 					};
 				}
 
-				// During the file upload, file content is automatically extracted.
-				const uploadedFile = await uploadFile(localStorage.token, file, metadata);
+				const uploadMetadata = {
+					...metadata,
+					chat_id: currentChatId
+				};
+				
+				const uploadedFile = await uploadFile(localStorage.token, file, uploadMetadata);
 
 			if (uploadedFile) {
 				if (uploadedFile.error) {
@@ -772,7 +783,7 @@
 				};
 				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
 			} else {
-				uploadFileHandler(file);
+				await uploadFileHandler(file);
 			}
 		});
 	};
@@ -1284,7 +1295,6 @@
 														type="button"
 														aria-label={$i18n.t('Remove file')}
 														on:click={async () => {
-															// If file was already processed (has id), delete from backend to update accumulator
 															if (file.id) {
 																try {
 																	await deleteFileById(localStorage.token, file.id);
@@ -1294,6 +1304,14 @@
 															}
 															files.splice(fileIdx, 1);
 															files = files;
+															
+															if (!$temporaryChatEnabled && $chatId && files.length === 0) {
+																try {
+																	await cleanupEmptyChat(localStorage.token, $chatId);
+																} catch (e) {
+																	console.error(`Error cleaning up empty chat:`, e);
+																}
+															}
 														}}
 													>
 														<svg
@@ -1322,7 +1340,6 @@
 												small={true}
 												modal={['file', 'collection'].includes(file?.type)}
 												on:dismiss={async () => {
-													// If file was already processed (has id), delete from backend to update accumulator
 													if (file.id) {
 														try {
 															await deleteFileById(localStorage.token, file.id);
@@ -1330,9 +1347,16 @@
 															console.error(`Error deleting file ${file.id}:`, e);
 														}
 													}
-													// Remove from UI state
 													files.splice(fileIdx, 1);
 													files = files;
+													
+													if (!$temporaryChatEnabled && $chatId && files.length === 0) {
+														try {
+															await cleanupEmptyChat(localStorage.token, $chatId);
+														} catch (e) {
+															console.error(`Error cleaning up empty chat:`, e);
+														}
+													}
 												}}
 												on:click={() => {
 													console.log(file);
