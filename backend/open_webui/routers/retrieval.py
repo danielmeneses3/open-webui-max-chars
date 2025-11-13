@@ -34,6 +34,7 @@ from langchain_core.documents import Document
 
 from open_webui.models.files import FileModel, FileUpdateForm, Files
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.chats import Chats, ChatForm
 from open_webui.storage.provider import Storage
 
 
@@ -1654,62 +1655,75 @@ def process_file(
                     ]
                 text_content = " ".join([doc.page_content for doc in docs])
 
-            # Validate character limit if configured (FILE_MAX_CHARS > 0 means enabled)
             if request.app.state.config.FILE_MAX_CHARS > 0:
                 char_count = len(text_content)
                 max_chars = request.app.state.config.FILE_MAX_CHARS
                 
-                # Get current accumulator for this user (default to 0 if not exists)
-                if not hasattr(request.app.state, "user_char_accumulator"):
-                    request.app.state.user_char_accumulator = {}
-                current_total = request.app.state.user_char_accumulator.get(user.id, 0)
+                chat_id = file.meta.get("chat_id") if file.meta else None
                 
-                # Calculate total characters (accumulator + current file)
-                total_chars = current_total + char_count
-                
-                # Validate against total character limit
-                if total_chars > max_chars:
-                    error_message = (
-                        f"Total file content exceeds maximum character limit. "
-                        f"Combined files contain {total_chars:,} characters, "
-                        f"but maximum allowed is {max_chars:,} characters."
-                    )
+                if chat_id:
+                    existing_chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id)
+                    if not existing_chat:
+                        try:
+                            Chats.insert_new_chat(
+                                user.id,
+                                ChatForm(
+                                    chat={
+                                        "id": chat_id,
+                                        "title": "New Chat",
+                                        "history": {"messages": {}, "currentId": None},
+                                        "messages": [],
+                                    },
+                                    folder_id=None,
+                                ),
+                            )
+                            log.debug(f"Created chat {chat_id} during file processing")
+                        except Exception as e:
+                            log.warning(f"Failed to create chat {chat_id} during file processing: {e}")
                     
-                    log.warning(
-                        f"File {file.id} ({file.filename}) rejected: {error_message} "
-                        f"(Current file: {char_count:,} chars, Accumulator: {current_total:,} chars)"
-                    )
+                    if not hasattr(request.app.state, "chat_char_accumulator"):
+                        request.app.state.chat_char_accumulator = {}
+                    current_total = request.app.state.chat_char_accumulator.get(chat_id, 0)
                     
-                    # Mark file as failed with error message
-                    Files.update_file_data_by_id(
-                        file.id,
-                        {
-                            "status": "failed",
-                            "error": error_message,
-                        },
-                    )
+                    total_chars = current_total + char_count
                     
-                    # Delete from storage to free up disk space
-                    # Keep in database for audit trail
-                    try:
-                        if file.path:
-                            Storage.delete_file(file.path)
-                            log.info(f"Deleted file from storage: {file.path}")
-                    except Exception as e:
-                        log.error(f"Error deleting file from storage: {e}")
+                    if total_chars > max_chars:
+                        error_message = (
+                            f"Total file content exceeds maximum character limit. "
+                            f"Combined files contain {total_chars:,} characters, "
+                            f"but maximum allowed is {max_chars:,} characters."
+                        )
+                        
+                        log.warning(
+                            f"File {file.id} ({file.filename}) rejected: {error_message} "
+                            f"(Current file: {char_count:,} chars, Accumulator: {current_total:,} chars)"
+                        )
+                        
+                        Files.update_file_data_by_id(
+                            file.id,
+                            {
+                                "status": "failed",
+                                "error": error_message,
+                            },
+                        )
+                        
+                        try:
+                            if file.path:
+                                Storage.delete_file(file.path)
+                                log.info(f"Deleted file from storage: {file.path}")
+                        except Exception as e:
+                            log.error(f"Error deleting file from storage: {e}")
+                        
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=ERROR_MESSAGES.DEFAULT(error_message),
+                        )
                     
-                    # Return HTTP 413 Payload Too Large
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=ERROR_MESSAGES.DEFAULT(error_message),
+                    request.app.state.chat_char_accumulator[chat_id] = total_chars
+                    log.debug(
+                        f"File {file.id} processed successfully. "
+                        f"Chat {chat_id} accumulator updated: {current_total:,} -> {total_chars:,} chars"
                     )
-                
-                # If validation passes, update accumulator with new total
-                request.app.state.user_char_accumulator[user.id] = total_chars
-                log.debug(
-                    f"File {file.id} processed successfully. "
-                    f"User {user.id} accumulator updated: {current_total:,} -> {total_chars:,} chars"
-                )
 
             log.debug(f"text_content: {text_content}")
             Files.update_file_data_by_id(

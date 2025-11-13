@@ -817,16 +817,27 @@ async def generate_chat_completion(
     if BYPASS_MODEL_ACCESS_CONTROL:
         bypass_filter = True
 
-    # Reset character accumulator when message is sent (files are being used in chat)
-    if hasattr(request.app.state, "user_char_accumulator"):
-        if user.id in request.app.state.user_char_accumulator:
-            log.debug(f"Resetting character accumulator for user {user.id} (message sent)")
-            request.app.state.user_char_accumulator[user.id] = 0
-
     idx = 0
 
     payload = {**form_data}
     metadata = payload.pop("metadata", None)
+    
+    if hasattr(request.app.state, "chat_char_accumulator") and metadata:
+        chat_id = metadata.get("chat_id")
+        if chat_id:
+            from open_webui.models.files import Files
+            
+            if not hasattr(request.app.state, "chat_char_accumulator"):
+                request.app.state.chat_char_accumulator = {}
+            
+            chat_files = Files.get_files_by_chat_id(chat_id, user.id)
+            total_chars = 0
+            for file in chat_files:
+                if file.data and file.data.get("content"):
+                    total_chars += len(file.data["content"])
+            
+            request.app.state.chat_char_accumulator[chat_id] = total_chars
+            log.debug(f"Recalculated character accumulator for chat {chat_id}: {total_chars:,} chars (from {len(chat_files)} files)")
 
     model_id = form_data.get("model")
     model_info = Models.get_model_by_id(model_id)
